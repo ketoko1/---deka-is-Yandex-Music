@@ -1,0 +1,2396 @@
+# -*- coding: utf-8 -*-
+"""
+СИГНАЛ// — дека для Яндекс Музыки.
+
+Зависимости:
+    pip install PyQt6 python-vlc yandex-music
+    + установленный VLC (libvlc)
+
+Запуск:
+    python dp.py
+"""
+
+import sys
+import os
+import json
+import math
+import time
+import random
+import tempfile
+import webbrowser
+import urllib.request
+from collections import OrderedDict
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
+    QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QSlider, QComboBox, QScrollArea, QStackedWidget,
+    QDialog, QDialogButtonBox, QMessageBox, QFileDialog, QColorDialog,
+    QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QSizePolicy
+)
+from PyQt6.QtCore import (
+    Qt, QTimer, QThread, pyqtSignal, QSize, QSettings, QPointF, QRectF,
+    QPropertyAnimation, QEasingCurve
+)
+from PyQt6.QtGui import (
+    QPixmap, QPainter, QColor, QPen, QBrush, QLinearGradient, QIcon,
+    QFont, QImage, QKeySequence, QShortcut, QPainterPath, QPolygonF, QPalette
+)
+
+try:
+    import vlc
+except ImportError:
+    vlc = None
+try:
+    from yandex_music import Client
+except ImportError:
+    Client = None
+
+
+# ============================================================
+#  ПАЛИТРЫ / КОНФИГ
+# ============================================================
+
+MONO = "'JetBrains Mono','Cascadia Mono',Consolas,'DejaVu Sans Mono',monospace"
+SANS = "'Segoe UI','Helvetica Neue',Arial,sans-serif"
+
+HEADER_FONTS = {
+    "display": "Impact,'Arial Black','Segoe UI',sans-serif",
+    "black":   "'Arial Black',Arial,sans-serif",
+    "sans":    SANS,
+    "mono":    MONO,
+}
+
+THEMES = {
+    "phosphor": dict(name="ФОСФОР",  bg="#0A0C08", surface="#10140C", overlay="#182010",
+                     ink="#E9F5D8", muted="#7C8C66", line="#2C3A1E", acc="#B7FF2B", acc2="#37E6FF",
+                     ok="#7DFF6A", warn="#FFB300", danger="#FF4438", info="#37E6FF"),
+    "magma":    dict(name="МАГМА",   bg="#100806", surface="#1A0E08", overlay="#261409",
+                     ink="#FFE9D6", muted="#A87E5C", line="#3E2513", acc="#FF6B1A", acc2="#FFD23F",
+                     ok="#9BE564", warn="#FFD23F", danger="#FF3B30", info="#4CC9F0"),
+    "midnight": dict(name="ПОЛНОЧЬ", bg="#060B14", surface="#0C1424", overlay="#13203A",
+                     ink="#DCE9FF", muted="#6E82A6", line="#22334F", acc="#3D9BFF", acc2="#7C5CFF",
+                     ok="#3DDC97", warn="#FFC53D", danger="#FF5C7A", info="#53E0FF"),
+    "neon":     dict(name="НЕОН",    bg="#0D0714", surface="#170D24", overlay="#221338",
+                     ink="#F4E9FF", muted="#9A7FB8", line="#382252", acc="#FF3DCB", acc2="#2BFFC6",
+                     ok="#2BFFC6", warn="#FFD166", danger="#FF4757", info="#4CC9F0"),
+    "tape":     dict(name="ПЛЁНКА",  bg="#0F0D08", surface="#17140C", overlay="#221C10",
+                     ink="#F5ECD8", muted="#9C8F6A", line="#3A3320", acc="#FFB300", acc2="#FF6B1A",
+                     ok="#A3E635", warn="#FFB300", danger="#FF4438", info="#5CC8FF"),
+    "paper":    dict(name="БУМАГА",  bg="#EFEAE0", surface="#F7F4EC", overlay="#FFFFFF",
+                     ink="#191712", muted="#6E675A", line="#D6CFBE", acc="#E85D04", acc2="#0077B6",
+                     ok="#2F9E44", warn="#B45309", danger="#C1121F", info="#0077B6"),
+}
+
+ACCENT_SWATCHES = ["#B7FF2B", "#FF6B1A", "#FF3DCB", "#3D9BFF",
+                   "#FFB300", "#2BFFC6", "#FF4438", "#7C5CFF"]
+
+DEFAULTS = {
+    "theme": "phosphor", "accent": "",
+    "radius": 4, "border": 2, "density": 1.0, "scale": 1.0,
+    "glow": True, "glow_power": 0.6,
+    "pattern": "grid", "pattern_alpha": 0.55,
+    "viz": "bars", "viz_sens": 0.75,
+    "cover": "square", "anim": True,
+    "header_font": "display", "nav_right": False, "studio_open": True,
+    "volume": 80, "quality": "hq",
+}
+STRUCT_KEYS = {"nav_right", "studio_open"}
+NUM_RANGE = {"radius": (0, 22), "border": (0, 4), "density": (0.8, 1.4),
+             "scale": (0.85, 1.25), "pattern_alpha": (0.0, 1.0),
+             "glow_power": (0.0, 1.0), "viz_sens": (0.1, 1.0), "volume": (0, 100)}
+ENUMS = {"theme": set(THEMES), "pattern": {"grid", "scan", "noise", "none"},
+         "viz": {"bars", "wave", "dots", "off"}, "cover": {"square", "vinyl"},
+         "header_font": set(HEADER_FONTS), "quality": {"nq", "hq", "lossless"}}
+
+TOKEN_FILE = ".yandex_token"
+WORKERS = set()
+IMG_CACHE = OrderedDict()
+IMG_CACHE_MAX = 400
+
+
+# ============================================================
+#  ЦВЕТОВЫЕ УТИЛИТЫ
+# ============================================================
+
+def hx(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+def rh(rgb):
+    return "#{:02x}{:02x}{:02x}".format(*[max(0, min(255, int(v))) for v in rgb])
+
+def lighten(h, f=0.2):
+    r, g, b = hx(h)
+    return rh((r + (255 - r) * f, g + (255 - g) * f, b + (255 - b) * f))
+
+def darken(h, f=0.3):
+    r, g, b = hx(h)
+    return rh((r * (1 - f), g * (1 - f), b * (1 - f)))
+
+def mix(h1, h2, t):
+    a, b = hx(h1), hx(h2)
+    return rh(tuple(a[i] + (b[i] - a[i]) * t for i in range(3)))
+
+def rgba(h, a):
+    r, g, b = hx(h)
+    return f"rgba({r},{g},{b},{a})"
+
+def contrast_on(h):
+    r, g, b = hx(h)
+    return "#0B0D08" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#FFFFFF"
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def fmt_ms(ms):
+    ms = max(0, int(ms))
+    s = ms // 1000
+    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+def resolve_pal(cfg):
+    t = THEMES.get(cfg["theme"], THEMES["phosphor"])
+    pal = {k: t[k] for k in ("bg", "surface", "overlay", "ink", "muted", "line",
+                             "acc2", "ok", "warn", "danger", "info")}
+    acc = cfg["accent"] if cfg["accent"] else t["acc"]
+    pal["accent"] = acc
+    pal["accent_hover"] = lighten(acc, 0.14)
+    pal["accent_dim"] = darken(acc, 0.45)
+    pal["on_accent"] = contrast_on(acc)
+    pal["is_light"] = cfg["theme"] == "paper"
+    return pal
+
+
+# ============================================================
+#  ГРАФИКА
+# ============================================================
+
+def make_mark(size, pal):
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    m = size * 0.06
+    p.setPen(QPen(QColor(pal["accent"]), max(1.5, size * 0.055)))
+    p.setBrush(QColor(pal["surface"]))
+    p.drawRoundedRect(QRectF(m, m, size - 2 * m, size - 2 * m), size * 0.12, size * 0.12)
+    heights = [0.32, 0.62, 1.0, 0.62, 0.32]
+    inner = size * 0.52
+    bw = size * 0.085
+    gap = (inner - 5 * bw) / 4
+    x0 = (size - inner) / 2
+    cy = size * 0.54
+    for i, h in enumerate(heights):
+        bh = inner * h
+        col = mix(pal["accent"], pal["acc2"], i / 4)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(col))
+        p.drawRoundedRect(QRectF(x0 + i * (bw + gap), cy - bh / 2, bw, bh), bw / 2, bw / 2)
+    p.setBrush(QColor(pal["danger"]))
+    d = size * 0.10
+    p.drawEllipse(QRectF(size - m - d * 1.7, m + d * 0.7, d, d))
+    p.end()
+    return pm
+
+
+def make_pattern_tile(kind, pal, alpha):
+    if kind == "none" or alpha <= 0.01:
+        return None
+    if kind == "grid":
+        t = QPixmap(22, 22); t.fill(Qt.GlobalColor.transparent)
+        p = QPainter(t)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(rgba(pal["ink"], int(70 * alpha))))
+        p.drawEllipse(QPointF(2, 2), 1.1, 1.1)
+        p.end(); return t
+    if kind == "scan":
+        t = QPixmap(4, 4); t.fill(Qt.GlobalColor.transparent)
+        p = QPainter(t)
+        p.fillRect(0, 0, 4, 1, QColor(rgba(pal["ink"], int(26 * alpha))))
+        p.end(); return t
+    if kind == "noise":
+        t = QPixmap(96, 96); t.fill(Qt.GlobalColor.transparent)
+        p = QPainter(t)
+        rng = random.Random(7)
+        c = QColor(rgba(pal["ink"], int(40 * alpha)))
+        for _ in range(150):
+            p.fillRect(rng.randrange(96), rng.randrange(96), 1, 1, c)
+        p.end(); return t
+    return None
+
+
+class ElidedLabel(QLabel):
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setFont(self.font())
+        p.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+        txt = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width())
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+
+
+class CoverLabel(QWidget):
+    def __init__(self, owner, base=44, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.img = None
+        self.angle = 0.0
+        self.deck = base >= 80
+        self.setFixedSize(base, base)
+
+    def set_base(self, px):
+        self.setFixedSize(px, px)
+        self.update()
+
+    def set_image(self, img):
+        self.img = img if (img and not img.isNull()) else None
+        self.update()
+
+    def tick(self, playing):
+        if (self.deck and self.img and playing and self.owner.cfg["anim"]
+                and self.owner.cfg["cover"] == "vinyl"):
+            self.angle = (self.angle + 2.4) % 360
+            self.update()
+
+    def paintEvent(self, e):
+        cfg, pal = self.owner.cfg, self.owner.pal
+        w, h = self.width(), self.height()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        vinyl = self.deck and cfg["cover"] == "vinyl"
+        path = QPainterPath()
+        if vinyl:
+            path.addEllipse(QRectF(1, 1, w - 2, h - 2))
+        else:
+            r = cfg["radius"] + (4 if self.deck else 0)
+            path.addRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), r, r)
+        p.setClipPath(path)
+        p.fillRect(self.rect(), QColor(pal["overlay"]))
+        if self.img:
+            iw, ih = self.img.width(), self.img.height()
+            sc = max(w / max(1, iw), h / max(1, ih))
+            dw, dh = iw * sc, ih * sc
+            target = QRectF((w - dw) / 2, (h - dh) / 2, dw, dh)
+            if vinyl:
+                p.save()
+                p.translate(w / 2, h / 2)
+                p.rotate(self.angle)
+                p.translate(-w / 2, -h / 2)
+                p.drawImage(target, self.img)
+                p.restore()
+                p.setClipping(False)
+                p.setClipPath(path)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                groove = QColor(rgba(pal["bg"], 120))
+                for rr in (0.46, 0.38, 0.30):
+                    p.setPen(QPen(groove, 1))
+                    p.drawEllipse(QPointF(w / 2, h / 2), w * rr, h * rr)
+                p.setPen(QPen(QColor(pal["accent"]), 2))
+                p.setBrush(QColor(pal["bg"]))
+                p.drawEllipse(QPointF(w / 2, h / 2), w * 0.13, h * 0.13)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(pal["accent"]))
+                p.drawEllipse(QPointF(w / 2, h / 2), w * 0.035, h * 0.035)
+            else:
+                p.drawImage(target, self.img)
+        else:
+            p.setPen(QColor(pal["muted"]))
+            f = p.font(); f.setPixelSize(int(h * 0.42)); p.setFont(f)
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "♫")
+        p.setClipping(False)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(pal["line"]), max(1, cfg["border"])))
+        if vinyl:
+            p.drawEllipse(QRectF(1, 1, w - 2, h - 2))
+        else:
+            r = cfg["radius"] + (4 if self.deck else 0)
+            p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), r, r)
+        p.end()
+
+
+class VizWidget(QWidget):
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.n = 36
+        self.lv = [0.0] * self.n
+        self.pk = [0.0] * self.n
+        self.t = 0.0
+        self.setMinimumWidth(150)
+        self.setFixedHeight(56)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def tick(self, dt, playing, vol):
+        self.t += dt
+        sens = self.owner.cfg["viz_sens"]
+        pump = (0.55 + 0.45 * math.sin(self.t * math.tau * 1.9)) ** 2
+        dirty = False
+        for i in range(self.n):
+            if playing:
+                shape = 0.35 + 0.65 * abs(math.sin(self.t * 1.6 + i * 0.37))
+                target = clamp((0.18 + 0.82 * shape * (0.55 + 0.45 * random.random()))
+                               * pump * sens * vol, 0.0, 1.0)
+            else:
+                target = 0.0
+            k = 0.5 if target > self.lv[i] else 0.12
+            nv = self.lv[i] + (target - self.lv[i]) * k
+            if abs(nv - self.lv[i]) > 0.002:
+                dirty = True
+            self.lv[i] = nv
+            self.pk[i] = max(self.lv[i], self.pk[i] - 0.018)
+        return dirty or playing
+
+    def paintEvent(self, e):
+        cfg, pal = self.owner.cfg, self.owner.pal
+        style = cfg["viz"]
+        if style == "off":
+            return
+        w, h = self.width(), self.height()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        glow = cfg["glow"]
+        gp = cfg["glow_power"]
+        if style == "bars":
+            bw = w / self.n
+            for i in range(self.n):
+                col = QColor(mix(pal["accent"], pal["acc2"], i / (self.n - 1)))
+                bh = max(2.0, self.lv[i] * (h - 6))
+                x = i * bw
+                if glow and bh > 4:
+                    p.fillRect(QRectF(x + bw * 0.05, h - bh - 3, bw * 0.9, bh + 3),
+                               QColor(rgba(mix(pal["accent"], pal["acc2"], i / (self.n - 1)),
+                                           int(46 * gp))))
+                p.fillRect(QRectF(x + bw * 0.18, h - bh, bw * 0.64, bh), col)
+                py = h - max(2.0, self.pk[i] * (h - 6)) - 2
+                p.fillRect(QRectF(x + bw * 0.18, py, bw * 0.64, 2), QColor(pal["ink"]))
+        elif style == "wave":
+            amp = (sum(self.lv) / self.n) * (h * 0.46)
+            mid = h / 2
+            for ghost, col, alpha, ph in ((True, pal["acc2"], 110, 1.4), (False, pal["accent"], 255, 0.0)):
+                poly = QPolygonF()
+                for s in range(65):
+                    x = s / 64 * w
+                    y = mid + amp * (0.6 * math.sin(self.t * 5 + s * 0.32 + ph)
+                                     + 0.4 * math.sin(self.t * 8.7 + s * 0.11 + ph))
+                    poly.append(QPointF(x, y))
+                pen = QPen(QColor(rgba(col, alpha)), 2)
+                p.setPen(pen)
+                p.drawPolyline(poly)
+            p.setPen(QPen(QColor(rgba(pal["line"], 160)), 1))
+            p.drawLine(0, int(mid), w, int(mid))
+        elif style == "dots":
+            cols, rows = 28, 7
+            cw, ch = w / cols, h / rows
+            for c in range(cols):
+                lvl = self.lv[int(c / cols * self.n)]
+                for r in range(rows):
+                    lit = (rows - r) / rows <= lvl + 0.04
+                    col = mix(pal["accent"], pal["acc2"], r / rows) if lit else pal["line"]
+                    a = 255 if lit else 130
+                    p.setBrush(QColor(rgba(col, a)))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    rad = min(cw, ch) * (0.30 if lit else 0.18)
+                    p.drawEllipse(QPointF(c * cw + cw / 2, r * ch + ch / 2), rad, rad)
+        p.end()
+
+
+class ClickSlider(QSlider):
+    def __init__(self, orient, parent=None):
+        super().__init__(orient, parent)
+
+    def _val_at(self, x):
+        span = self.maximum() - self.minimum()
+        return int(self.minimum() + span * clamp(x / max(1, self.width()), 0, 1))
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
+            self.setValue(self._val_at(e.position().x()))
+            self.setSliderDown(True)
+            self.sliderMoved.emit(self.value())
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self.isSliderDown():
+            self.setValue(self._val_at(e.position().x()))
+            self.sliderMoved.emit(self.value())
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self.isSliderDown():
+            self.setSliderDown(False)
+            self.sliderReleased.emit()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+
+class Led(QLabel):
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        self.setObjectName("led")
+        self.name = name
+        self.color = "#555555"
+
+    def set_state(self, color):
+        self.color = color
+        self.setText(f'<span style="color:{color};">●</span>&nbsp;{self.name}')
+
+
+class ToggleKey(QPushButton):
+    def __init__(self, label, parent=None):
+        super().__init__(parent)
+        self.label = label
+        self.setObjectName("toggle")
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh()
+
+    def refresh(self):
+        self.setText(f"{self.label} · {'ВКЛ' if self.isChecked() else 'ВЫКЛ'}")
+
+
+# ============================================================
+#  СТРОКИ СПИСКОВ
+# ============================================================
+
+class TrackRow(QFrame):
+    def __init__(self, owner, track, idx, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.track = track
+        self.idx = idx
+        self.tid = str(getattr(track, "id", ""))
+        self.setObjectName("trackRow")
+        self._cover_started = False
+        self.cover_url = None
+        if getattr(track, "cover_uri", None):
+            self.cover_url = "https://" + track.cover_uri.replace("%%", "200x200")
+
+        lay = QHBoxLayout(self)
+        lay.setSpacing(12)
+        self.idx_lbl = QLabel(f"{idx + 1:02d}" if idx >= 0 else "··")
+        self.idx_lbl.setObjectName("rIdx")
+        self.idx_lbl.setFixedWidth(26)
+        self.cover = CoverLabel(owner, 44)
+        title = getattr(track, "title", "без названия")
+        artists = ", ".join(a.name for a in track.artists) if getattr(track, "artists", None) else "—"
+        self.title_lbl = ElidedLabel(title)
+        self.title_lbl.setObjectName("rTitle")
+        self.sub_lbl = ElidedLabel(artists)
+        self.sub_lbl.setObjectName("rSub")
+        tl = QVBoxLayout(); tl.setSpacing(2)
+        tl.addWidget(self.title_lbl); tl.addWidget(self.sub_lbl)
+        self.active_chip = QLabel("● ЭФИР")
+        self.active_chip.setObjectName("chipActive")
+        self.active_chip.setVisible(False)
+        dur = getattr(track, "duration_ms", None)
+        self.dur_lbl = QLabel(fmt_ms(dur) if dur else "--:--")
+        self.dur_lbl.setObjectName("rDur")
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setObjectName("rowPlay")
+        self.play_btn.setFixedSize(30, 30)
+        self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_btn.clicked.connect(lambda: owner.play_row(self))
+        lay.addWidget(self.idx_lbl)
+        lay.addWidget(self.cover)
+        lay.addLayout(tl, 1)
+        lay.addWidget(self.active_chip)
+        lay.addWidget(self.dur_lbl)
+        lay.addWidget(self.play_btn)
+        self.set_density(owner.cfg["density"])
+
+    def set_density(self, d):
+        v = int(7 * d)
+        self.layout().setContentsMargins(10, v, 10, v)
+        self.cover.set_base(int(44 * d))
+
+    def set_active(self, on):
+        self.active_chip.setVisible(on)
+        self.setProperty("active", on)
+        self.style().unpolish(self); self.style().polish(self)
+
+    def ensure_cover(self):
+        if self._cover_started or not self.cover_url:
+            return
+        self._cover_started = True
+        if self.cover_url in IMG_CACHE:
+            self.cover.set_image(IMG_CACHE[self.cover_url])
+            return
+        w = ImageWorker(self.cover_url)
+        w.done.connect(lambda url, img: self.owner.on_cover(url, img, self))
+        WORKERS.add(w)
+        w.finished.connect(lambda w=w: WORKERS.discard(w))
+        w.start()
+
+
+class PlaylistRow(QFrame):
+    def __init__(self, owner, pl, idx, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.setObjectName("trackRow")
+        self._cover_started = False
+        self.cover_url = None
+        cov = getattr(pl, "cover", None)
+        if cov and getattr(cov, "uri", None):
+            self.cover_url = "https://" + cov.uri.replace("%%", "200x200")
+        lay = QHBoxLayout(self)
+        lay.setSpacing(12)
+        idx_lbl = QLabel(f"{idx + 1:02d}")
+        idx_lbl.setObjectName("rIdx"); idx_lbl.setFixedWidth(26)
+        self.cover = CoverLabel(owner, 44)
+        self.title_lbl = ElidedLabel(getattr(pl, "title", "плейлист"))
+        self.title_lbl.setObjectName("rTitle")
+        n = getattr(pl, "track_count", 0) or 0
+        self.sub_lbl = ElidedLabel(f"{n} треков · подборка")
+        self.sub_lbl.setObjectName("rSub")
+        tl = QVBoxLayout(); tl.setSpacing(2)
+        tl.addWidget(self.title_lbl); tl.addWidget(self.sub_lbl)
+        arrow = QLabel("→")
+        arrow.setObjectName("rDur")
+        lay.addWidget(idx_lbl); lay.addWidget(self.cover)
+        lay.addLayout(tl, 1); lay.addWidget(arrow)
+        self.set_density(owner.cfg["density"])
+
+    def set_density(self, d):
+        v = int(7 * d)
+        self.layout().setContentsMargins(10, v, 10, v)
+        self.cover.set_base(int(44 * d))
+
+    def set_active(self, on):
+        pass
+
+    def ensure_cover(self):
+        if self._cover_started or not self.cover_url:
+            return
+        self._cover_started = True
+        if self.cover_url in IMG_CACHE:
+            self.cover.set_image(IMG_CACHE[self.cover_url])
+            return
+        w = ImageWorker(self.cover_url)
+        w.done.connect(lambda url, img: self.owner.on_cover(url, img, self))
+        WORKERS.add(w)
+        w.finished.connect(lambda w=w: WORKERS.discard(w))
+        w.start()
+
+
+# ============================================================
+#  ПОТОКИ
+# ============================================================
+
+class AuthWorker(QThread):
+    code = pyqtSignal(str, str)
+    ok = pyqtSignal(str)
+    err = pyqtSignal(str)
+
+    def run(self):
+        try:
+            client = Client()
+            token = client.device_auth(on_code=lambda c: self.code.emit(c.verification_url, c.user_code))
+            self.ok.emit(token.access_token)
+        except Exception as e:
+            self.err.emit(str(e))
+
+
+class ConnectWorker(QThread):
+    ok = pyqtSignal(object, object, str)
+    err = pyqtSignal(str)
+
+    def __init__(self, token):
+        super().__init__()
+        self.token = token
+
+    def run(self):
+        try:
+            client = Client(self.token).init()
+            ids = set()
+            try:
+                likes = client.users_likes_tracks()
+                items = likes.tracks if hasattr(likes, "tracks") else likes
+                for it in items or []:
+                    tid = getattr(it, "id", None)
+                    if tid is None and getattr(it, "track", None):
+                        tid = it.track.id
+                    if tid is not None:
+                        ids.add(str(tid))
+            except Exception:
+                pass
+            name = "оператор"
+            try:
+                me = client.me
+                acc = getattr(me, "account", None)
+                name = (getattr(acc, "display_name", None) or getattr(acc, "login", None) or name)
+            except Exception:
+                pass
+            self.ok.emit(client, ids, str(name))
+        except Exception as e:
+            self.err.emit(str(e))
+
+
+class ApiWorker(QThread):
+    result = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self):
+        try:
+            self.result.emit(self.fn())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class DownloadWorker(QThread):
+    ready = pyqtSignal(int, str, str, object, bool)
+    fail = pyqtSignal(int, str)
+
+    def __init__(self, gen, track, quality):
+        super().__init__()
+        self.gen, self.track, self.quality = gen, track, quality
+
+    def run(self):
+        try:
+            infos = self.track.get_download_info()
+            if not infos:
+                raise RuntimeError("нет доступных файлов")
+            flac = [i for i in infos if i.codec == "flac"]
+            mp3 = sorted([i for i in infos if i.codec == "mp3"],
+                         key=lambda i: i.bitrate_in_kbps or 0)
+            if self.quality == "lossless" and flac:
+                fi = flac[0]
+                meta = "FLAC · LOSSLESS"
+            elif self.quality == "nq" and mp3:
+                fi = mp3[0]
+                meta = f"MP3 · {fi.bitrate_in_kbps} KBPS"
+            elif mp3:
+                hi = [i for i in mp3 if (i.bitrate_in_kbps or 0) >= 320]
+                fi = hi[0] if hi else mp3[-1]
+                meta = f"MP3 · {fi.bitrate_in_kbps} KBPS"
+            elif flac:
+                fi = flac[0]; meta = "FLAC · LOSSLESS"
+            else:
+                fi = infos[0]; meta = (fi.codec or "AUDIO").upper()
+            ext = fi.codec or "mp3"
+            path = os.path.join(tempfile.gettempdir(),
+                                f"signal_{self.track.id}_{self.quality}.{ext}")
+            cached = os.path.exists(path) and os.path.getsize(path) > 0
+            if not cached:
+                fi.download(path)
+            self.ready.emit(self.gen, path, meta, self.track, cached)
+        except Exception as e:
+            self.fail.emit(self.gen, str(e))
+
+
+class ImageWorker(QThread):
+    done = pyqtSignal(str, QImage)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            req = urllib.request.Request(self.url, headers={"User-Agent": "SignalDeck/1.0"})
+            data = urllib.request.urlopen(req, timeout=10).read()
+            img = QImage()
+            if img.loadFromData(data):
+                self.done.emit(self.url, img)
+        except Exception:
+            pass
+
+
+# ============================================================
+#  ДИАЛОГ АВТОРИЗАЦИИ
+# ============================================================
+
+class AuthDialog(QDialog):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setWindowTitle("Подключение · СИГНАЛ//")
+        self.setFixedSize(460, 330)
+        self.setModal(False)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(26, 24, 26, 20)
+        lay.setSpacing(12)
+        cap = QLabel("НАСТРОЙКА ЧАСТОТЫ")
+        cap.setObjectName("grpTitle")
+        self.code_lbl = QLabel("···· ····")
+        self.code_lbl.setObjectName("authCode")
+        self.code_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.url_lbl = QLabel("ожидаем код от Яндекс ID…")
+        self.url_lbl.setObjectName("sub")
+        self.url_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.url_lbl.setWordWrap(True)
+        self.status_lbl = QLabel("Запрашиваем код устройства…")
+        self.status_lbl.setObjectName("sub")
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row = QHBoxLayout(); row.setSpacing(10)
+        self.open_btn = QPushButton("ОТКРЫТЬ САЙТ")
+        self.open_btn.setObjectName("primary")
+        self.open_btn.setEnabled(False)
+        self.open_btn.clicked.connect(self.open_url)
+        self.copy_btn = QPushButton("КОПИРОВАТЬ КОД")
+        self.copy_btn.clicked.connect(self.copy_code)
+        self.copy_btn.setEnabled(False)
+        row.addWidget(self.open_btn, 1); row.addWidget(self.copy_btn, 1)
+        self.retry_btn = QPushButton("ПОВТОРИТЬ")
+        self.retry_btn.setVisible(False)
+        self.retry_btn.clicked.connect(self.retry)
+        close_btn = QPushButton("ОТМЕНА")
+        close_btn.clicked.connect(self.reject)
+        row2 = QHBoxLayout(); row2.addWidget(self.retry_btn); row2.addStretch(); row2.addWidget(close_btn)
+        lay.addWidget(cap)
+        lay.addWidget(self.code_lbl)
+        lay.addWidget(self.url_lbl)
+        lay.addWidget(self.status_lbl)
+        lay.addStretch()
+        lay.addLayout(row)
+        lay.addLayout(row2)
+        self._url = None
+        self._code = None
+        self._dots = 0
+        self._t = QTimer(self)
+        self._t.timeout.connect(self._pulse)
+        self._t.start(450)
+
+    def _pulse(self):
+        self._dots = (self._dots + 1) % 4
+        if self._code:
+            self.status_lbl.setText("Ожидание подтверждения" + "." * self._dots)
+
+    def set_code(self, url, code):
+        self._url, self._code = url, code
+        self.code_lbl.setText(code)
+        self.url_lbl.setText(url)
+        self.open_btn.setEnabled(True)
+        self.copy_btn.setEnabled(True)
+
+    def open_url(self):
+        if self._url:
+            webbrowser.open(self._url)
+
+    def copy_code(self):
+        if self._code:
+            QApplication.clipboard().setText(self._code)
+            self.owner.toast("КОД СКОПИРОВАН", "info")
+
+    def fail(self, msg):
+        self._t.stop()
+        self.code_lbl.setText("СБОЙ")
+        self.status_lbl.setText(msg[:160])
+        self.retry_btn.setVisible(True)
+
+    def retry(self):
+        self.accept()
+        self.owner.authorize()
+
+    def done_ok(self):
+        self._t.stop()
+        self.accept()
+
+
+# ============================================================
+#  СТИЛЬ
+# ============================================================
+
+def build_qss(cfg, pal):
+    def S(n):
+        return max(9, int(round(n * cfg["scale"])))
+    b = int(cfg["border"])
+    r = int(cfg["radius"])
+    rs = max(2, r // 2)
+    bd = "none" if b == 0 else f"{b}px solid {pal['line']}"
+    bda = "none" if b == 0 else f"{b}px solid {pal['accent']}"
+    acc, ink, mut = pal["accent"], pal["ink"], pal["muted"]
+    on_acc = pal["on_accent"]
+    hov = rgba(ink, 18 if not pal["is_light"] else 14)
+    return f"""
+    QWidget {{ color: {ink}; font-family: {SANS}; font-size: {S(14)}px; }}
+    QMainWindow, QDialog {{ background: {pal['bg']}; }}
+    QWidget#root {{ background: transparent; }}
+
+    QFrame#topbar {{ background: {pal['surface']}; border-bottom: {bd}; }}
+    QLabel#brandSub {{ color: {mut}; font-family: {MONO}; font-size: {S(11)}px; }}
+    QLabel#led {{ color: {mut}; font-family: {MONO}; font-size: {S(11)}px; }}
+    QLabel#clock {{ color: {ink}; font-family: {MONO}; font-size: {S(13)}px;
+        border: {bd}; border-radius: {rs}px; padding: 4px 10px; background: {pal['overlay']}; }}
+
+    QPushButton {{ background: {pal['overlay']}; border: {bd}; border-radius: {rs}px;
+        padding: {S(7)}px {S(14)}px; color: {ink}; font-weight: 600; }}
+    QPushButton:hover {{ border-color: {acc}; }}
+    QPushButton:pressed {{ background: {pal['surface']}; }}
+    QPushButton:disabled {{ color: {rgba(mut, 120)}; border-color: {rgba(pal['line'], 120)}; }}
+    QPushButton:focus {{ outline: none; }}
+
+    QPushButton#hkey {{ background: transparent; font-family: {MONO}; font-size: {S(12)}px;
+        padding: {S(6)}px {S(12)}px; color: {mut}; }}
+    QPushButton#hkey:hover {{ color: {ink}; border-color: {acc}; }}
+    QPushButton#hkey:checked {{ color: {acc}; border-color: {acc}; background: {hov}; }}
+
+    QFrame#nav {{ background: {pal['surface']}; border-right: {bd}; }}
+    QLabel#navCap {{ color: {mut}; font-family: {MONO}; font-size: {S(10)}px; padding: 6px 4px; }}
+    QPushButton#deckKey {{ background: transparent; border: {bd}; border-color: transparent;
+        border-left: {max(b, 2)}px solid transparent; border-radius: {rs}px;
+        text-align: left; padding: {S(12)}px {S(12)}px; color: {mut};
+        font-size: {S(13)}px; font-weight: 700; }}
+    QPushButton#deckKey:hover {{ color: {ink}; background: {hov}; }}
+    QPushButton#deckKey:checked {{ color: {acc}; background: {hov};
+        border-color: {pal['line']}; border-left: {max(b, 2) + 2}px solid {acc}; }}
+    QLabel#account {{ color: {mut}; font-family: {MONO}; font-size: {S(11)}px;
+        border: {bd}; border-radius: {rs}px; padding: 8px 10px; background: {pal['overlay']}; }}
+
+    QFrame#content {{ background: transparent; }}
+    QLineEdit#search {{ background: {pal['surface']}; border: {bd}; border-radius: {rs}px;
+        padding: 0 {S(14)}px; color: {ink}; font-family: {MONO}; font-size: {S(13)}px;
+        selection-background-color: {acc}; selection-color: {on_acc}; }}
+    QLineEdit#search:focus {{ border-color: {acc}; }}
+    QPushButton#primary {{ background: {acc}; color: {on_acc}; border: none;
+        border-radius: {rs}px; font-weight: 800; font-size: {S(13)}px; }}
+    QPushButton#primary:hover {{ background: {pal['accent_hover']}; }}
+    QPushButton#primary:pressed {{ background: {pal['accent_dim']}; }}
+    QPushButton#primary:disabled {{ background: {rgba(mut, 90)}; color: {rgba(ink, 120)}; }}
+
+    QLabel#sub {{ color: {mut}; font-family: {MONO}; font-size: {S(12)}px; }}
+    QLabel#offCopy {{ color: {mut}; font-size: {S(14)}px; }}
+
+    QListWidget {{ background: transparent; border: none; outline: none; }}
+    QListWidget::item {{ border-radius: {rs}px; border: 1px solid transparent; margin-bottom: 3px; }}
+    QListWidget::item:hover {{ background: {hov}; }}
+    QListWidget::item:selected {{ background: {hov}; border: 1px solid {pal['line']}; }}
+
+    QFrame#trackRow {{ background: transparent; border-radius: {rs}px; }}
+    QFrame#trackRow[active="true"] {{ background: {hov}; border: 1px solid {pal['line']};
+        border-left: {max(b, 2) + 2}px solid {acc}; }}
+    QLabel#rIdx {{ color: {mut}; font-family: {MONO}; font-size: {S(12)}px; }}
+    QLabel#rTitle {{ color: {ink}; font-weight: 700; font-size: {S(15)}px; }}
+    QLabel#rSub {{ color: {mut}; font-family: {MONO}; font-size: {S(12)}px; }}
+    QLabel#rDur {{ color: {mut}; font-family: {MONO}; font-size: {S(12)}px; }}
+    QLabel#chipActive {{ color: {acc}; font-family: {MONO}; font-size: {S(10)}px;
+        border: 1px solid {acc}; border-radius: {rs}px; padding: 2px 7px; }}
+    QPushButton#rowPlay {{ background: transparent; border: {bd}; border-radius: {rs}px;
+        color: {mut}; padding: 0; font-size: {S(12)}px; }}
+    QFrame#trackRow:hover QPushButton#rowPlay {{ color: {acc}; border-color: {acc}; }}
+
+    QLabel#chip {{ font-family: {MONO}; font-size: {S(10)}px; padding: 2px 8px;
+        border: 1px solid {pal['line']}; border-radius: {rs}px; color: {mut}; }}
+    QLabel#chip[tone="ok"] {{ color: {pal['ok']}; border-color: {pal['ok']}; }}
+    QLabel#chip[tone="warn"] {{ color: {pal['warn']}; border-color: {pal['warn']}; }}
+    QLabel#chip[tone="danger"] {{ color: {pal['danger']}; border-color: {pal['danger']}; }}
+    QLabel#chip[tone="info"] {{ color: {pal['info']}; border-color: {pal['info']}; }}
+    QLabel#chip[tone="accent"] {{ color: {acc}; border-color: {acc}; }}
+
+    QFrame#deck {{ background: {pal['surface']}; border-top: {bd}; }}
+    QLabel#dTitle {{ color: {ink}; font-weight: 800; font-size: {S(16)}px; }}
+    QLabel#dArtist {{ color: {mut}; font-family: {MONO}; font-size: {S(12)}px; }}
+    QLabel#tCur, QLabel#tDur {{ color: {ink}; font-family: {MONO}; font-size: {S(13)}px; }}
+    QLabel#tDur {{ color: {mut}; }}
+    QPushButton#playBig {{ background: {acc}; color: {on_acc}; border: none;
+        border-radius: {max(rs, 4)}px; font-size: {S(20)}px; }}
+    QPushButton#playBig:hover {{ background: {pal['accent_hover']}; }}
+    QPushButton#playBig:pressed {{ background: {pal['accent_dim']}; }}
+    QPushButton#key {{ background: {pal['overlay']}; border: {bd}; border-radius: {rs}px;
+        color: {mut}; font-size: {S(14)}px; padding: 0; }}
+    QPushButton#key:hover {{ color: {ink}; border-color: {acc}; }}
+    QPushButton#likeKey[liked="true"] {{ color: {pal['danger']}; border-color: {pal['danger']}; }}
+
+    QSlider::groove:horizontal {{ border: none; height: 6px; background: {pal['line']};
+        border-radius: 3px; }}
+    QSlider::sub-page:horizontal {{ background: {acc}; border-radius: 3px; }}
+    QSlider::add-page:horizontal {{ background: {pal['line']}; border-radius: 3px; }}
+    QSlider::handle:horizontal {{ background: {ink}; width: {S(12)}px; height: {S(18)}px;
+        margin: -6px 0; border-radius: {min(rs, 5)}px; border: {max(1, b)}px solid {acc}; }}
+    QSlider::handle:horizontal:hover {{ background: {acc}; }}
+    QSlider::groove:horizontal:disabled {{ background: {rgba(pal['line'], 110)}; }}
+    QSlider::handle:horizontal:disabled {{ background: {mut}; border-color: {mut}; }}
+
+    QFrame#studio {{ background: {pal['surface']}; border-left: {bd}; }}
+    QScrollArea {{ background: transparent; border: none; }}
+    QWidget#studioInner {{ background: transparent; }}
+    QFrame#grp {{ background: transparent; border: {bd}; border-radius: {r}px; }}
+    QLabel#grpTitle {{ color: {acc}; font-family: {MONO}; font-size: {S(10)}px; }}
+    QLabel#ctl {{ color: {ink}; font-size: {S(13)}px; }}
+    QLabel#val {{ color: {mut}; font-family: {MONO}; font-size: {S(11)}px; }}
+    QPushButton#toggle {{ background: transparent; border: {bd}; border-radius: {rs}px;
+        font-family: {MONO}; font-size: {S(11)}px; color: {mut}; padding: {S(7)}px {S(10)}px; }}
+    QPushButton#toggle:checked {{ color: {acc}; border-color: {acc}; background: {hov}; }}
+    QPushButton#preset {{ font-family: {MONO}; font-size: {S(11)}px; padding: {S(8)}px; }}
+    QPushButton#swatch {{ border: {max(b, 1)}px solid {pal['line']}; border-radius: {rs}px; padding: 0; }}
+
+    QComboBox {{ background: {pal['overlay']}; border: {bd}; border-radius: {rs}px;
+        padding: {S(6)}px {S(10)}px; color: {ink}; font-size: {S(12)}px; }}
+    QComboBox:hover {{ border-color: {acc}; }}
+    QComboBox::drop-down {{ border: none; width: 20px; }}
+    QComboBox::down-arrow {{ width: 0; height: 0; border-left: 5px solid transparent;
+        border-right: 5px solid transparent; border-top: 6px solid {mut}; margin-right: 6px; }}
+    QComboBox QAbstractItemView {{ background: {pal['overlay']}; border: {bd};
+        selection-background-color: {acc}; selection-color: {on_acc}; outline: none; }}
+
+    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+    QScrollBar::handle:vertical {{ background: {pal['line']}; min-height: 32px; border-radius: 5px; }}
+    QScrollBar::handle:vertical:hover {{ background: {acc}; }}
+    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
+    QScrollBar::handle:horizontal {{ background: {pal['line']}; min-width: 32px; border-radius: 5px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {acc}; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+    QLabel#authCode {{ color: {acc}; font-family: {MONO}; font-size: {S(30)}px;
+        border: {bd}; border-radius: {r}px; padding: 14px; background: {pal['overlay']}; }}
+    QLabel#toast {{ background: {pal['overlay']}; border: {max(b, 1)}px solid {acc};
+        border-radius: {rs}px; color: {acc}; font-family: {MONO}; font-size: {S(12)}px;
+        padding: 10px 16px; }}
+    QLabel#toast[tone="ok"] {{ color: {pal['ok']}; border-color: {pal['ok']}; }}
+    QLabel#toast[tone="warn"] {{ color: {pal['warn']}; border-color: {pal['warn']}; }}
+    QLabel#toast[tone="danger"] {{ color: {pal['danger']}; border-color: {pal['danger']}; }}
+    QLabel#toast[tone="info"] {{ color: {pal['info']}; border-color: {pal['info']}; }}
+
+    QMessageBox {{ background: {pal['surface']}; }}
+    QMessageBox QLabel {{ color: {ink}; }}
+    QToolTip {{ background: {pal['overlay']}; color: {ink}; border: 1px solid {acc};
+        font-family: {MONO}; font-size: {S(11)}px; padding: 4px 8px; }}
+    """
+
+
+# ============================================================
+#  ГЛАВНОЕ ОКНО
+# ============================================================
+
+class SignalDeck(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.settings = QSettings("SignalDeck", "Signal")
+        self.cfg = dict(DEFAULTS)
+        try:
+            raw = self.settings.value("cfg_json", "")
+            if raw:
+                self.cfg.update(self._sanitize(json.loads(raw)))
+        except Exception:
+            pass
+
+        self.client = None
+        self.token = None
+        self.liked_ids = set()
+        self.current_track = None
+        self.current_queue = []
+        self.queue_index = -1
+        self.view = "wave"
+        self.view_gen = 0
+        self.play_gen = 0
+        self.wave_session = None
+        self.wave_seq = []
+        self.wave_id = ""
+        self._wave_gen = 0
+        self._active_row = None
+        self._row_by_id = {}
+        self._audio_cache = {}
+        self._dl_active = 0
+        self._advancing = False
+        self._auth_attempts = 0
+        self._auth_dialog = None
+        self._auth_worker = None
+        self._conn_worker = None
+        self._section_raw = "МОЯ ВОЛНА"
+        self._blink = False
+        self._tick_n = 0
+        self._pattern_sig = None
+        self._pattern_tile = None
+        self._media = None
+        self._net_ok = False
+        self._buf_on = False
+
+        self.pal = resolve_pal(self.cfg)
+        self.vlc_instance = vlc.Instance("--no-video", "--quiet", "--no-video-title-show")
+        self.player = self.vlc_instance.media_player_new()
+        self.player.audio_set_volume(int(self.cfg["volume"]))
+
+        self._build_ui()
+        self.restyle()
+        self.apply_structure()
+        self._set_online(False)
+        self.show_offline("НЕТ СИГНАЛА",
+                          "Дека не подключена к Яндекс Музыке. Авторизуйтесь по коду — и волна пойдёт сама.",
+                          cta=True)
+
+        self._restyle_timer = QTimer(self); self._restyle_timer.setSingleShot(True)
+        self._restyle_timer.timeout.connect(self.restyle)
+        self._save_timer = QTimer(self); self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self.save_cfg)
+
+        self.t_slow = QTimer(self); self.t_slow.timeout.connect(self.tick_slow); self.t_slow.start(250)
+        self.t_fast = QTimer(self); self.t_fast.timeout.connect(self.tick_fast); self.t_fast.start(33)
+
+        self._shortcuts()
+        QTimer.singleShot(150, self.load_token)
+
+    def _build_ui(self):
+        self.setWindowTitle("СИГНАЛ// — дека Яндекс Музыки")
+        self.setMinimumSize(1180, 740)
+        self.resize(1380, 860)
+
+        self.root = QWidget()
+        self.root.setObjectName("root")
+        self.root.paintEvent = self._paint_root
+        self.setCentralWidget(self.root)
+        outer = QVBoxLayout(self.root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.topbar = QFrame(); self.topbar.setObjectName("topbar")
+        self.topbar.setFixedHeight(62)
+        tb = QHBoxLayout(self.topbar)
+        tb.setContentsMargins(18, 0, 18, 0); tb.setSpacing(14)
+        self.mark_lbl = QLabel(); self.mark_lbl.setFixedSize(30, 30)
+        brand_col = QVBoxLayout(); brand_col.setSpacing(0)
+        self.brand_lbl = QLabel("СИГНАЛ//")
+        self.brand_lbl.setObjectName("brand")
+        sub = QLabel("дека · яндекс музыка")
+        sub.setObjectName("brandSub")
+        brand_col.addWidget(self.brand_lbl); brand_col.addWidget(sub)
+        self.led_net = Led("СЕТЬ"); self.led_buf = Led("БУФЕР"); self.led_rec = Led("ЭФИР")
+        tb.addWidget(self.mark_lbl); tb.addLayout(brand_col)
+        tb.addSpacing(18)
+        for led in (self.led_net, self.led_buf, self.led_rec):
+            tb.addWidget(led)
+        tb.addStretch()
+        self.clock_lbl = QLabel("00:00:00"); self.clock_lbl.setObjectName("clock")
+        tb.addWidget(self.clock_lbl)
+        self.mute_btn = QPushButton("ЗВУК: ВКЛ"); self.mute_btn.setObjectName("hkey")
+        self.mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mute_btn.setToolTip("Общий звук · M")
+        self.mute_btn.clicked.connect(self.toggle_mute)
+        tb.addWidget(self.mute_btn)
+        self.studio_btn = QPushButton("ПУЛЬТ"); self.studio_btn.setObjectName("hkey")
+        self.studio_btn.setCheckable(True)
+        self.studio_btn.setChecked(bool(self.cfg["studio_open"]))
+        self.studio_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.studio_btn.setToolTip("Панель кастомизации · Ctrl+K")
+        self.studio_btn.clicked.connect(lambda: self.set_cfg("studio_open", self.studio_btn.isChecked()))
+        tb.addWidget(self.studio_btn)
+        outer.addWidget(self.topbar)
+
+        self.body = QHBoxLayout(); self.body.setContentsMargins(0, 0, 0, 0); self.body.setSpacing(0)
+
+        self.nav = QFrame(); self.nav.setObjectName("nav"); self.nav.setFixedWidth(212)
+        nv = QVBoxLayout(self.nav)
+        nv.setContentsMargins(14, 18, 14, 14); nv.setSpacing(6)
+        cap = QLabel("КАНАЛЫ"); cap.setObjectName("navCap")
+        nv.addWidget(cap)
+        self.key_wave = QPushButton("01 / МОЯ ВОЛНА")
+        self.key_likes = QPushButton("02 / ЛАЙКИ")
+        self.key_plists = QPushButton("03 / ПОДБОРКИ")
+        self.nav_keys = {"wave": self.key_wave, "likes": self.key_likes, "playlists": self.key_plists}
+        for k, btn in self.nav_keys.items():
+            btn.setObjectName("deckKey"); btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            nv.addWidget(btn)
+        self.key_wave.clicked.connect(self.start_wave)
+        self.key_likes.clicked.connect(self.load_likes)
+        self.key_plists.clicked.connect(self.load_playlists)
+        nv.addStretch()
+        self.account_lbl = ElidedLabel("ОПЕРАТОР: —")
+        self.account_lbl.setObjectName("account")
+        nv.addWidget(self.account_lbl)
+        self.logout_btn = QPushButton("СБРОС СЕССИИ"); self.logout_btn.setObjectName("hkey")
+        self.logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logout_btn.clicked.connect(self.confirm_logout)
+        nv.addWidget(self.logout_btn)
+        self.body.addWidget(self.nav)
+
+        self.content = QFrame(); self.content.setObjectName("content")
+        cv = QVBoxLayout(self.content)
+        cv.setContentsMargins(24, 18, 24, 10); cv.setSpacing(10)
+        top = QHBoxLayout(); top.setSpacing(10)
+        self.back_btn = QPushButton("←"); self.back_btn.setObjectName("hkey")
+        self.back_btn.setFixedSize(42, 42); self.back_btn.setVisible(False)
+        self.back_btn.setToolTip("Назад к подборкам")
+        self.back_btn.clicked.connect(self.load_playlists)
+        top.addWidget(self.back_btn)
+        self.search = QLineEdit(); self.search.setObjectName("search")
+        self.search.setPlaceholderText("запрос // enter")
+        self.search.setFixedHeight(42)
+        self.search.setClearButtonEnabled(True)
+        self.search.returnPressed.connect(self.do_search)
+        top.addWidget(self.search, 1)
+        self.find_btn = QPushButton("НАЙТИ"); self.find_btn.setObjectName("primary")
+        self.find_btn.setFixedSize(96, 42)
+        self.find_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.find_btn.clicked.connect(self.do_search)
+        top.addWidget(self.find_btn)
+        cv.addLayout(top)
+
+        self.stack = QStackedWidget()
+        page_list = QWidget()
+        pl = QVBoxLayout(page_list)
+        pl.setContentsMargins(0, 4, 0, 0); pl.setSpacing(4)
+        self.h_display = QLabel("МОЯ ВОЛНА")
+        self.h_display.setObjectName("hDisplay")
+        self.sub_lbl = QLabel("канал не настроен")
+        self.sub_lbl.setObjectName("sub")
+        pl.addWidget(self.h_display); pl.addWidget(self.sub_lbl)
+        self.list = QListWidget(); self.list.setObjectName("list")
+        self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.list.setSpacing(3)
+        self.list.itemDoubleClicked.connect(self.on_item_double)
+        self.list.verticalScrollBar().valueChanged.connect(self.ensure_visible_covers)
+        pl.addWidget(self.list, 1)
+        self.stack.addWidget(page_list)
+
+        page_off = QWidget()
+        ov = QVBoxLayout(page_off)
+        ov.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ov.setSpacing(14)
+        self.off_mark = QLabel()
+        self.off_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.off_title = QLabel("НЕТ СИГНАЛА")
+        self.off_title.setObjectName("hDisplay")
+        self.off_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.off_copy = QLabel("")
+        self.off_copy.setObjectName("offCopy")
+        self.off_copy.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.off_copy.setWordWrap(True)
+        self.off_copy.setMaximumWidth(460)
+        self.off_btn = QPushButton("ПОДКЛЮЧИТЬ АККАУНТ")
+        self.off_btn.setObjectName("primary")
+        self.off_btn.setFixedSize(240, 48)
+        self.off_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.off_btn.clicked.connect(self.authorize)
+        ow = QHBoxLayout(); ow.addStretch(); ow.addWidget(self.off_btn); ow.addStretch()
+        oc = QHBoxLayout(); oc.addStretch(); oc.addWidget(self.off_copy); oc.addStretch()
+        ov.addWidget(self.off_mark); ov.addWidget(self.off_title)
+        ov.addLayout(oc); ov.addLayout(ow)
+        self.stack.addWidget(page_off)
+        cv.addWidget(self.stack, 1)
+        self.body.addWidget(self.content, 1)
+
+        self._build_studio()
+        self.body.addWidget(self.studio)
+        outer.addLayout(self.body, 1)
+
+        self.deck = QFrame(); self.deck.setObjectName("deck")
+        self.deck.setFixedHeight(142)
+        dk = QHBoxLayout(self.deck)
+        dk.setContentsMargins(20, 14, 20, 14); dk.setSpacing(20)
+
+        self.deck_cover = CoverLabel(self, 96)
+        meta = QVBoxLayout(); meta.setSpacing(4)
+        self.d_title = ElidedLabel("ЭФИР ПУСТ")
+        self.d_title.setObjectName("dTitle")
+        self.d_artist = ElidedLabel("подключите канал")
+        self.d_artist.setObjectName("dArtist")
+        chips = QHBoxLayout(); chips.setSpacing(6)
+        self.codec_chip = QLabel("—"); self.codec_chip.setObjectName("chip")
+        self.codec_chip.setProperty("tone", "info")
+        self.cache_chip = QLabel("КЭШ"); self.cache_chip.setObjectName("chip")
+        self.cache_chip.setProperty("tone", "accent")
+        self.cache_chip.setVisible(False)
+        chips.addWidget(self.codec_chip); chips.addWidget(self.cache_chip); chips.addStretch()
+        meta.addWidget(self.d_title); meta.addWidget(self.d_artist); meta.addLayout(chips)
+        left = QHBoxLayout(); left.setSpacing(14)
+        left.addWidget(self.deck_cover); left.addLayout(meta, 1)
+        lw = QWidget(); lw.setLayout(left); lw.setMinimumWidth(280)
+        dk.addWidget(lw, 3)
+
+        center = QVBoxLayout(); center.setSpacing(8)
+        tr = QHBoxLayout(); tr.setSpacing(8)
+        tr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.prev_btn = QPushButton("◀◀"); self.next_btn = QPushButton("▶▶")
+        self.stop_btn = QPushButton("■")
+        self.like_btn = QPushButton("♥"); self.dislike_btn = QPushButton("✕")
+        self.play_btn = QPushButton("▶"); self.play_btn.setObjectName("playBig")
+        self.play_btn.setFixedSize(56, 48)
+        for btn, tip in ((self.prev_btn, "Предыдущий · P"), (self.stop_btn, "Стоп"),
+                         (self.next_btn, "Следующий · N"),
+                         (self.like_btn, "Лайк · L"), (self.dislike_btn, "Дизлайк (волна) · D")):
+            btn.setObjectName("key" if btn is not self.like_btn else "likeKey")
+            btn.setFixedSize(44, 40)
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.like_btn.setObjectName("likeKey")
+        self.like_btn.setProperty("liked", False)
+        self.prev_btn.clicked.connect(self.prev_track)
+        self.stop_btn.clicked.connect(self.stop_playback)
+        self.next_btn.clicked.connect(self.next_track)
+        self.play_btn.clicked.connect(self.toggle_play)
+        self.play_btn.setToolTip("Играть / пауза · Space")
+        self.like_btn.clicked.connect(self.toggle_like)
+        self.dislike_btn.clicked.connect(self.send_dislike)
+        for w in (self.dislike_btn, self.prev_btn, self.play_btn, self.stop_btn,
+                  self.next_btn, self.like_btn):
+            tr.addWidget(w)
+        center.addLayout(tr)
+        pr = QHBoxLayout(); pr.setSpacing(10)
+        self.t_cur = QLabel("0:00"); self.t_cur.setObjectName("tCur")
+        self.t_cur.setFixedWidth(52)
+        self.t_cur.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.t_dur = QLabel("0:00"); self.t_dur.setObjectName("tDur")
+        self.t_dur.setFixedWidth(52)
+        self.seek = ClickSlider(Qt.Orientation.Horizontal)
+        self.seek.setRange(0, 0)
+        self.seek.sliderMoved.connect(self.on_seek)
+        pr.addWidget(self.t_cur); pr.addWidget(self.seek, 1); pr.addWidget(self.t_dur)
+        center.addLayout(pr)
+        dk.addLayout(center, 5)
+
+        right = QVBoxLayout(); right.setSpacing(8)
+        self.viz = VizWidget(self)
+        right.addWidget(self.viz)
+        vr = QHBoxLayout(); vr.setSpacing(8)
+        self.deck_mute = QPushButton("◉"); self.deck_mute.setObjectName("key")
+        self.deck_mute.setFixedSize(34, 30)
+        self.deck_mute.setToolTip("Общий звук · M")
+        self.deck_mute.clicked.connect(self.toggle_mute)
+        self.vol = QSlider(Qt.Orientation.Horizontal)
+        self.vol.setRange(0, 100)
+        self.vol.setValue(int(self.cfg["volume"]))
+        self.vol.setFixedWidth(120)
+        self.vol.valueChanged.connect(self.on_volume)
+        self.vol_pct = QLabel(f"{int(self.cfg['volume'])}%")
+        self.vol_pct.setObjectName("val")
+        self.vol_pct.setFixedWidth(38)
+        vr.addStretch(); vr.addWidget(self.deck_mute); vr.addWidget(self.vol); vr.addWidget(self.vol_pct)
+        right.addLayout(vr)
+        rw = QWidget(); rw.setLayout(right); rw.setMinimumWidth(200)
+        dk.addWidget(rw, 3)
+        outer.addWidget(self.deck)
+
+        self.fx_play = QGraphicsDropShadowEffect(self)
+        self.play_btn.setGraphicsEffect(self.fx_play)
+        self.fx_cover = QGraphicsDropShadowEffect(self)
+        self.deck_cover.setGraphicsEffect(self.fx_cover)
+
+        self.toast_lbl = QLabel("", self.root)
+        self.toast_lbl.setObjectName("toast")
+        self.toast_lbl.setVisible(False)
+        self.toast_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.toast_fx = QGraphicsOpacityEffect(self.toast_lbl)
+        self.toast_lbl.setGraphicsEffect(self.toast_fx)
+        self.toast_anim = QPropertyAnimation(self.toast_fx, b"opacity", self)
+        self.toast_anim.setDuration(180)
+        self.toast_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.toast_timer = QTimer(self); self.toast_timer.setSingleShot(True)
+        self.toast_timer.timeout.connect(self._toast_hide)
+
+    def _build_studio(self):
+        self.studio = QFrame(); self.studio.setObjectName("studio")
+        self.studio.setFixedWidth(302)
+        sv = QVBoxLayout(self.studio)
+        sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(0)
+        head = QLabel("ПУЛЬТ КАСТОМИЗАЦИИ")
+        head.setObjectName("grpTitle")
+        head.setContentsMargins(16, 14, 16, 8)
+        sv.addWidget(head)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget(); inner.setObjectName("studioInner")
+        self.studio_lay = QVBoxLayout(inner)
+        self.studio_lay.setContentsMargins(14, 4, 14, 16)
+        self.studio_lay.setSpacing(12)
+        scroll.setWidget(inner)
+        sv.addWidget(scroll, 1)
+
+        self.ctl = {}
+        self.val_chips = {}
+        self.swatches = []
+
+        g = self._grp("ТЕМА")
+        self._combo(g, "Палитра", "theme",
+                    [(t["name"], k) for k, t in THEMES.items()])
+        sw_row = QGridLayout(); sw_row.setSpacing(6)
+        for i, col in enumerate(ACCENT_SWATCHES):
+            b = QPushButton(); b.setObjectName("swatch")
+            b.setFixedSize(26, 26)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(col)
+            b.clicked.connect(lambda _, c=col: self.set_cfg("accent", c))
+            self.swatches.append((b, col))
+            sw_row.addWidget(b, 0, i)
+        g.layout().addLayout(sw_row)
+        row = QHBoxLayout(); row.setSpacing(6)
+        custom = QPushButton("СВОЙ ЦВЕТ…"); custom.setObjectName("preset")
+        custom.clicked.connect(self.pick_accent)
+        reset_acc = QPushButton("ОТ ТЕМЫ"); reset_acc.setObjectName("preset")
+        reset_acc.clicked.connect(lambda: self.set_cfg("accent", ""))
+        row.addWidget(custom, 1); row.addWidget(reset_acc, 1)
+        g.layout().addLayout(row)
+
+        g = self._grp("ФОРМА")
+        self._slider(g, "Скругление", "radius", 0, 22, lambda v: v, lambda v: f"{v}px")
+        self._slider(g, "Рамка", "border", 0, 4, lambda v: v, lambda v: f"{v}px")
+        self._slider(g, "Плотность", "density", 80, 140, lambda v: v / 100, lambda v: f"{v}%")
+        self._slider(g, "Масштаб текста", "scale", 85, 125, lambda v: v / 100, lambda v: f"{v}%")
+        self._combo(g, "Шрифт заголовков", "header_font",
+                    [("DISPLAY", "display"), ("HEAVY", "black"), ("SANS", "sans"), ("MONO", "mono")])
+        self._combo(g, "Обложка в деке", "cover", [("КВАДРАТ", "square"), ("ВИНИЛ", "vinyl")])
+        self._toggle(g, "Навигация справа", "nav_right")
+
+        g = self._grp("СЦЕНА")
+        self._combo(g, "Фон", "pattern",
+                    [("ТОЧКИ", "grid"), ("СКАНЛАЙНЫ", "scan"), ("ШУМ", "noise"), ("ЧИСТЫЙ", "none")])
+        self._slider(g, "Интенсивность фона", "pattern_alpha", 0, 100, lambda v: v / 100, lambda v: f"{v}%")
+        self._toggle(g, "Свечение", "glow")
+        self._slider(g, "Сила свечения", "glow_power", 0, 100, lambda v: v / 100, lambda v: f"{v}%")
+        self._toggle(g, "Анимации", "anim")
+
+        g = self._grp("АНАЛИЗАТОР")
+        self._combo(g, "Стиль", "viz",
+                    [("БАРЫ", "bars"), ("ВОЛНА", "wave"), ("МАТРИЦА", "dots"), ("ВЫКЛ", "off")])
+        self._slider(g, "Чувствительность", "viz_sens", 10, 100, lambda v: v / 100, lambda v: f"{v}%")
+
+        g = self._grp("ЗВУК")
+        self._combo(g, "Качество потока", "quality",
+                    [("MP3 · 320", "hq"), ("MP3 · 128", "nq"), ("FLAC · LOSSLESS", "lossless")])
+
+        g = self._grp("ПРЕСЕТЫ")
+        pr = QGridLayout(); pr.setSpacing(6)
+        for i, (label, fn) in enumerate((("СЛУЧАЙНО", self.randomize), ("СБРОС", self.reset_visual),
+                                         ("ЭКСПОРТ JSON", self.export_cfg), ("ИМПОРТ JSON", self.import_cfg))):
+            b = QPushButton(label); b.setObjectName("preset")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(fn)
+            pr.addWidget(b, i // 2, i % 2)
+        g.layout().addLayout(pr)
+        self.studio_lay.addStretch()
+        self.sync_studio()
+
+    def _grp(self, title):
+        f = QFrame(); f.setObjectName("grp")
+        lay = QVBoxLayout(f)
+        lay.setContentsMargins(12, 10, 12, 12); lay.setSpacing(8)
+        t = QLabel(title); t.setObjectName("grpTitle")
+        lay.addWidget(t)
+        self.studio_lay.addWidget(f)
+        return f
+
+    def _combo(self, grp, label, key, items):
+        l = QLabel(label); l.setObjectName("ctl")
+        cb = QComboBox()
+        for name, data in items:
+            cb.addItem(name, data)
+        cb.currentIndexChanged.connect(lambda _, k=key, c=cb: self.set_cfg(k, c.currentData()))
+        grp.layout().addWidget(l); grp.layout().addWidget(cb)
+        self.ctl[key] = cb
+
+    def _slider(self, grp, label, key, lo, hi, to_cfg, fmt):
+        row = QHBoxLayout()
+        l = QLabel(label); l.setObjectName("ctl")
+        chip = QLabel(""); chip.setObjectName("val")
+        row.addWidget(l); row.addStretch(); row.addWidget(chip)
+        s = QSlider(Qt.Orientation.Horizontal)
+        s.setRange(lo, hi)
+        def on_val(v, k=key, ch=chip, tc=to_cfg, fm=fmt):
+            ch.setText(fm(v))
+            self.set_cfg(k, tc(v))
+        s.valueChanged.connect(on_val)
+        grp.layout().addLayout(row); grp.layout().addWidget(s)
+        self.ctl[key] = s
+        self.val_chips[key] = (chip, fmt)
+
+    def _toggle(self, grp, label, key):
+        t = ToggleKey(label)
+        t.toggled.connect(lambda on, k=key, w=t: (w.refresh(), self.set_cfg(k, on)))
+        grp.layout().addWidget(t)
+        self.ctl[key] = t
+
+    def sync_studio(self):
+        for key, w in self.ctl.items():
+            w.blockSignals(True)
+            v = self.cfg[key]
+            if isinstance(w, QComboBox):
+                i = w.findData(v)
+                if i >= 0:
+                    w.setCurrentIndex(i)
+            elif isinstance(w, QSlider):
+                iv = int(round(v * 100)) if isinstance(v, float) else int(v)
+                w.setValue(iv)
+                if key in self.val_chips:
+                    chip, fmt = self.val_chips[key]
+                    chip.setText(fmt(iv))
+            elif isinstance(w, ToggleKey):
+                w.setChecked(bool(v))
+                w.refresh()
+            w.blockSignals(False)
+        self.studio_btn.blockSignals(True)
+        self.studio_btn.setChecked(bool(self.cfg["studio_open"]))
+        self.studio_btn.blockSignals(False)
+
+    def _sanitize(self, data):
+        out = {}
+        if not isinstance(data, dict):
+            return out
+        for k, dv in DEFAULTS.items():
+            if k not in data:
+                continue
+            v = data[k]
+            if isinstance(dv, bool):
+                out[k] = bool(v)
+            elif isinstance(dv, (int, float)):
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if k in NUM_RANGE:
+                    v = clamp(v, *NUM_RANGE[k])
+                out[k] = int(v) if isinstance(dv, int) else v
+            elif isinstance(dv, str):
+                if not isinstance(v, str):
+                    continue
+                if k in ENUMS and v not in ENUMS[k]:
+                    continue
+                if k == "accent" and v and not (len(v) == 7 and v.startswith("#")):
+                    continue
+                out[k] = v
+        return out
+
+    def set_cfg(self, key, val):
+        if self.cfg.get(key) == val:
+            if key in STRUCT_KEYS:
+                self.apply_structure()
+            return
+        self.cfg[key] = val
+        if key in STRUCT_KEYS:
+            self.apply_structure()
+        self._restyle_timer.start(25)
+        self._save_timer.start(500)
+
+    def save_cfg(self):
+        self.settings.setValue("cfg_json", json.dumps(self.cfg, ensure_ascii=False))
+
+    def apply_structure(self):
+        for w in (self.nav, self.content, self.studio):
+            self.body.removeWidget(w)
+        if self.cfg["nav_right"]:
+            self.body.addWidget(self.content, 1)
+            self.body.addWidget(self.studio)
+            self.body.addWidget(self.nav)
+        else:
+            self.body.addWidget(self.nav)
+            self.body.addWidget(self.content, 1)
+            self.body.addWidget(self.studio)
+        self.studio.setVisible(bool(self.cfg["studio_open"]))
+        self.studio_btn.blockSignals(True)
+        self.studio_btn.setChecked(bool(self.cfg["studio_open"]))
+        self.studio_btn.blockSignals(False)
+
+    def restyle(self):
+        cfg = self.cfg
+        pal = resolve_pal(cfg)
+        self.pal = pal
+        self.setStyleSheet(build_qss(cfg, pal))
+
+        def S(n):
+            return max(9, int(round(n * cfg["scale"])))
+        fam = HEADER_FONTS.get(cfg["header_font"], HEADER_FONTS["display"])
+        f = QFont(); f.setFamilies([x.strip().strip("'") for x in fam.split(",")])
+        f.setPixelSize(S(24)); f.setWeight(QFont.Weight.Black)
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2.5)
+        self.brand_lbl.setFont(f)
+        f2 = QFont(f); f2.setPixelSize(S(32)); f2.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+        self.h_display.setFont(f2)
+        self.off_title.setFont(f2)
+        f3 = QFont(); f3.setFamilies([x.strip().strip("'") for x in SANS.split(",")])
+        f3.setPixelSize(S(13)); f3.setWeight(QFont.Weight.Bold)
+        f3.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+        for btn in self.nav_keys.values():
+            btn.setFont(f3)
+
+        self._render_section()
+        self.mark_lbl.setPixmap(make_mark(30, pal))
+        self.off_mark.setPixmap(make_mark(88, pal))
+        self.setWindowIcon(QIcon(make_mark(64, pal)))
+        self._refresh_leds()
+
+        sig = (cfg["pattern"], round(cfg["pattern_alpha"], 2), cfg["theme"])
+        if sig != self._pattern_sig:
+            self._pattern_sig = sig
+            self._pattern_tile = make_pattern_tile(cfg["pattern"], pal, cfg["pattern_alpha"])
+
+        for fx, base_blur in ((self.fx_play, 26), (self.fx_cover, 30)):
+            if cfg["glow"]:
+                fx.setBlurRadius(6 + base_blur * cfg["glow_power"])
+                fx.setColor(QColor(rgba(pal["accent"], 150)))
+                fx.setOffset(0, 0)
+            else:
+                fx.setBlurRadius(0)
+                fx.setColor(QColor(0, 0, 0, 40 if pal["is_light"] else 130))
+                fx.setOffset(3, 3)
+
+        cur_acc = cfg["accent"] or THEMES[cfg["theme"]]["acc"]
+        for b, col in self.swatches:
+            ring = pal["ink"] if col.lower() == cur_acc.lower() else pal["line"]
+            b.setStyleSheet(f"QPushButton#swatch {{ background:{col}; border-color:{ring}; }}")
+
+        d = cfg["density"]
+        h = int(62 * d)
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setSizeHint(QSize(0, h))
+            w = self.list.itemWidget(it)
+            if w and hasattr(w, "set_density"):
+                w.set_density(d)
+
+        self.viz.setVisible(cfg["viz"] != "off")
+        self.viz.update()
+        self.deck_cover.update()
+        self.root.update()
+
+    def _render_section(self):
+        self.h_display.setText(
+            f'{self._section_raw}<span style="color:{self.pal["accent"]};">//</span>')
+
+    def set_section(self, raw, sub):
+        self._section_raw = raw.upper()
+        self._render_section()
+        self.sub_lbl.setText(sub)
+
+    def _paint_root(self, e):
+        p = QPainter(self.root)
+        pal = self.pal
+        p.fillRect(self.root.rect(), QColor(pal["bg"]))
+        if self._pattern_tile:
+            p.drawTiledPixmap(self.root.rect(), self._pattern_tile)
+        grad = QLinearGradient(0, 0, 0, self.root.height())
+        grad.setColorAt(0.0, QColor(rgba(pal["accent"], 12)))
+        grad.setColorAt(0.35, QColor(0, 0, 0, 0))
+        grad.setColorAt(1.0, QColor(rgba(pal["acc2"], 8)))
+        p.fillRect(self.root.rect(), QBrush(grad))
+        p.end()
+
+    def _refresh_leds(self):
+        pal = self.pal
+        self.led_net.set_state(pal["ok"] if self._net_ok else pal["danger"])
+        self.led_buf.set_state(pal["info"] if self._dl_active > 0 else pal["line"])
+        playing = self.player.is_playing() if self.player else False
+        if playing:
+            self.led_rec.set_state(pal["accent"] if (self._blink or not self.cfg["anim"]) else pal["line"])
+        elif self.current_track:
+            self.led_rec.set_state(pal["warn"])
+        else:
+            self.led_rec.set_state(pal["line"])
+
+    def toast(self, msg, tone="accent"):
+        self.toast_lbl.setText(msg)
+        self.toast_lbl.setProperty("tone", tone)
+        self.toast_lbl.style().unpolish(self.toast_lbl)
+        self.toast_lbl.style().polish(self.toast_lbl)
+        self.toast_lbl.adjustSize()
+        self._place_toast()
+        self.toast_lbl.setVisible(True)
+        self.toast_anim.stop()
+        if self.cfg["anim"]:
+            self.toast_fx.setOpacity(0.0)
+            self.toast_anim.setStartValue(0.0); self.toast_anim.setEndValue(1.0)
+            self.toast_anim.start()
+        else:
+            self.toast_fx.setOpacity(1.0)
+        self.toast_timer.start(2200)
+
+    def _toast_hide(self):
+        if self.cfg["anim"]:
+            self.toast_anim.stop()
+            self.toast_anim.setStartValue(self.toast_fx.opacity())
+            self.toast_anim.setEndValue(0.0)
+            try:
+                self.toast_anim.finished.disconnect()
+            except TypeError:
+                pass
+            self.toast_anim.finished.connect(lambda: self.toast_lbl.setVisible(False))
+            self.toast_anim.start()
+        else:
+            self.toast_lbl.setVisible(False)
+
+    def _place_toast(self):
+        if hasattr(self, "toast_lbl"):
+            self.toast_lbl.move(self.width() - self.toast_lbl.width() - 24,
+                                self.height() - self.deck.height() - self.toast_lbl.height() - 20)
+            self.toast_lbl.raise_()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_toast()
+
+    def api(self, fn, on_ok, on_err=None):
+        w = ApiWorker(fn)
+        w.result.connect(on_ok)
+        w.error.connect(on_err if on_err else (lambda m: self.toast(f"ОШИБКА: {m[:60]}", "danger")))
+        WORKERS.add(w)
+        w.finished.connect(lambda w=w: WORKERS.discard(w))
+        w.start()
+        return w
+
+    def on_cover(self, url, img, row):
+        IMG_CACHE[url] = img
+        while len(IMG_CACHE) > IMG_CACHE_MAX:
+            IMG_CACHE.popitem(last=False)
+        try:
+            row.cover.set_image(img)
+        except RuntimeError:
+            pass
+
+    def ensure_visible_covers(self, *args):
+        vp = self.list.viewport()
+        y = 0
+        step = max(20, int(62 * self.cfg["density"]))
+        while y < vp.height():
+            it = self.list.itemAt(0, y)
+            if it:
+                w = self.list.itemWidget(it)
+                if w and hasattr(w, "ensure_cover"):
+                    w.ensure_cover()
+                y += step
+            else:
+                y += step
+
+    def load_token(self):
+        try:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                self.token = f.read().strip()
+        except FileNotFoundError:
+            self.token = None
+        if self.token:
+            self.connect_token(self.token)
+        else:
+            self.authorize()
+
+    def authorize(self):
+        if Client is None:
+            self.show_offline("НЕТ БИБЛИОТЕКИ",
+                              "Установите yandex-music: pip install yandex-music",
+                              cta=False)
+            return
+        self.show_offline("НАСТРОЙКА ЧАСТОТЫ…",
+                          "Откройте ссылку из диалога и введите код с экрана. Волна запустится автоматически.",
+                          cta=False)
+        if self._auth_dialog:
+            try:
+                self._auth_dialog.close()
+            except RuntimeError:
+                pass
+        self._auth_dialog = AuthDialog(self)
+        self._auth_worker = AuthWorker()
+        WORKERS.add(self._auth_worker)
+        self._auth_worker.finished.connect(lambda: WORKERS.discard(self._auth_worker))
+        self._auth_worker.code.connect(self._auth_dialog.set_code)
+        self._auth_worker.ok.connect(self.on_auth_ok)
+        self._auth_worker.err.connect(self._auth_dialog.fail)
+        self._auth_dialog.rejected.connect(lambda: self.show_offline(
+            "НЕТ СИГНАЛА", "Дека не подключена к Яндекс Музыке. Авторизуйтесь по коду — и волна пойдёт сама.", cta=True))
+        self._auth_worker.start()
+        self._auth_dialog.show()
+
+    def on_auth_ok(self, token):
+        self.token = token
+        try:
+            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+                f.write(token)
+        except OSError:
+            pass
+        if self._auth_dialog:
+            self._auth_dialog.done_ok()
+        self.connect_token(token)
+
+    def connect_token(self, token):
+        self.show_offline("СИНХРОНИЗАЦИЯ…", "Проверяем токен и загружаем лайки.", cta=False)
+        self._conn_worker = ConnectWorker(token)
+        WORKERS.add(self._conn_worker)
+        self._conn_worker.finished.connect(lambda: WORKERS.discard(self._conn_worker))
+        self._conn_worker.ok.connect(self.on_connected)
+        self._conn_worker.err.connect(self.on_connect_fail)
+        self._conn_worker.start()
+
+    def on_connected(self, client, ids, name):
+        self.client = client
+        self.liked_ids = ids
+        self._auth_attempts = 0
+        self._net_ok = True
+        self.account_lbl.setText(f"ОПЕРАТОР: {name}")
+        self._set_online(True)
+        self.toast(f"СИГНАЛ ПРИНЯТ · {name}", "ok")
+        self.start_wave()
+
+    def on_connect_fail(self, msg):
+        self._auth_attempts += 1
+        try:
+            os.remove(TOKEN_FILE)
+        except OSError:
+            pass
+        if self._auth_attempts < 2:
+            self.authorize()
+        else:
+            self.show_offline("СБОЙ СИНХРОНИЗАЦИИ", msg[:200], cta=True)
+            self.toast("НЕ УДАЛОСЬ ПОДКЛЮЧИТЬСЯ", "danger")
+
+    def confirm_logout(self):
+        r = QMessageBox.question(self, "Сброс сессии",
+                                 "Отключить аккаунт и удалить сохранённый токен?",
+                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        self.view_gen += 1
+        self.play_gen += 1
+        self._wave_gen += 1
+        self.player.stop()
+        self.client = None
+        self.current_track = None
+        self.current_queue = []
+        self.wave_session = None
+        self.wave_seq = []
+        self.liked_ids = set()
+        self._net_ok = False
+        try:
+            os.remove(TOKEN_FILE)
+        except OSError:
+            pass
+        self.list.clear()
+        self._row_by_id = {}
+        self._active_row = None
+        self.d_title.setText("ЭФИР ПУСТ")
+        self.d_artist.setText("подключите канал")
+        self.deck_cover.set_image(None)
+        self.codec_chip.setText("—")
+        self.cache_chip.setVisible(False)
+        self.account_lbl.setText("ОПЕРАТОР: —")
+        self._set_online(False)
+        self.show_offline("НЕТ СИГНАЛА",
+                          "Сессия сброшена. Подключите аккаунт заново, чтобы вернуть волну.", cta=True)
+        self.toast("СЕССИЯ СБРОШЕНА", "warn")
+
+    def show_offline(self, title, copy, cta):
+        self._section_raw = title
+        self.off_title.setText(title)
+        self.off_copy.setText(copy)
+        self.off_btn.setVisible(cta)
+        self.off_btn.setEnabled(cta)
+        self.stack.setCurrentIndex(1)
+
+    def _set_online(self, on):
+        for w in (*self.nav_keys.values(), self.search, self.find_btn,
+                  self.prev_btn, self.play_btn, self.stop_btn, self.next_btn,
+                  self.like_btn, self.dislike_btn, self.seek):
+            w.setEnabled(on)
+        self._refresh_leds()
+
+    def set_nav(self, key):
+        for k, btn in self.nav_keys.items():
+            btn.setChecked(k == key)
+
+    def _begin_view(self, view, title, sub):
+        self.view = view
+        self.view_gen += 1
+        self.back_btn.setVisible(False)
+        self.set_nav(view if view in self.nav_keys else None)
+        self.set_section(title, sub)
+        self.list.clear()
+        self._row_by_id = {}
+        self._active_row = None
+        self.stack.setCurrentIndex(0)
+        return self.view_gen
+
+    def populate_tracks(self, tracks, sub):
+        self.current_queue = list(tracks)
+        self.queue_index = -1
+        self.list.clear()
+        self._row_by_id = {}
+        h = int(62 * self.cfg["density"])
+        for i, tr in enumerate(tracks):
+            it = QListWidgetItem(self.list)
+            it.setSizeHint(QSize(0, h))
+            it.setData(Qt.ItemDataRole.UserRole, ("track", tr, i))
+            row = TrackRow(self, tr, i)
+            self.list.setItemWidget(it, row)
+            self._row_by_id[str(tr.id)] = row
+        self.sub_lbl.setText(sub)
+        self._mark_active_row()
+        QTimer.singleShot(0, self.ensure_visible_covers)
+
+    def start_wave(self):
+        if not self.client:
+            return
+        g = self._begin_view("wave", "МОЯ ВОЛНА", "настройка автопотока…")
+        self._wave_gen += 1
+        wg = self._wave_gen
+        self.wave_seq = []
+        self.wave_session = None
+        self.d_title.setText("НАСТРОЙКА…")
+        self.d_artist.setText("ловим частоту")
+
+        def fetch():
+            s = self.client.rotor_session_new(seeds=["user:onyourwave"])
+            more = self.client.rotor_session_tracks(s.radio_session_id)
+            return more
+
+        def ok(more):
+            if g != self.view_gen or wg != self._wave_gen:
+                return
+            self.wave_session = more
+            self.wave_id = str(getattr(more, "radio_session_id", "") or "")
+            self.wave_seq = list(more.sequence or [])
+            self.set_section("МОЯ ВОЛНА", f"сессия {self.wave_id[-8:] or '—'} · автопоток")
+            self.wave_next()
+
+        def err(m):
+            if g == self.view_gen:
+                self.set_section("МОЯ ВОЛНА", "канал недоступен")
+                self.toast(f"ВОЛНА: {m[:60]}", "danger")
+
+        self.api(fetch, ok, err)
+
+    def wave_next(self, auto=False):
+        if not self.wave_session or self.view != "wave":
+            return
+        if self.wave_seq:
+            item = self.wave_seq.pop(0)
+            tr = getattr(item, "track", None)
+            if tr:
+                self.request_play(tr)
+                self._append_wave_row(tr)
+            else:
+                self.wave_next(auto)
+            return
+        wg = self._wave_gen
+        sid = self.wave_id
+
+        def fetch():
+            return self.client.rotor_session_tracks(sid)
+
+        def ok(more):
+            if wg != self._wave_gen or self.view != "wave":
+                return
+            self.wave_session = more
+            self.wave_seq = list(more.sequence or [])
+            if self.wave_seq:
+                self.wave_next(auto)
+            else:
+                self.toast("ВОЛНА ПУСТА · повторите", "warn")
+
+        self.api(fetch, ok, lambda m: self.toast(f"ВОЛНА: {m[:60]}", "danger"))
+
+    def _append_wave_row(self, tr):
+        it = QListWidgetItem(self.list)
+        it.setSizeHint(QSize(0, int(62 * self.cfg["density"])))
+        it.setData(Qt.ItemDataRole.UserRole, ("track", tr, -1))
+        row = TrackRow(self, tr, -1)
+        self.list.setItemWidget(it, row)
+        self._row_by_id[str(tr.id)] = row
+        row.ensure_cover()
+        self.list.scrollToBottom()
+
+    def load_likes(self):
+        if not self.client:
+            return
+        g = self._begin_view("likes", "ЛАЙКИ", "загрузка канала…")
+        self.search.clear()
+
+        def fetch():
+            likes = self.client.users_likes_tracks()
+            if hasattr(likes, "fetch_tracks"):
+                try:
+                    return list(likes.fetch_tracks() or [])
+                except Exception:
+                    pass
+            out = []
+            items = likes.tracks if hasattr(likes, "tracks") else likes
+            for it in (items or [])[:200]:
+                tr = getattr(it, "track", None)
+                if not tr and hasattr(it, "fetch_track"):
+                    try:
+                        tr = it.fetch_track()
+                    except Exception:
+                        tr = None
+                if tr:
+                    out.append(tr)
+            return out
+
+        def ok(tracks):
+            if g != self.view_gen:
+                return
+            self.liked_ids = {str(t.id) for t in tracks}
+            self.populate_tracks(tracks, f"{len(tracks)} треков · синхронизировано")
+            self._sync_like_key()
+
+        self.api(fetch, ok, lambda m: (self.sub_lbl.setText("сбой загрузки"),
+                                       self.toast(f"ЛАЙКИ: {m[:60]}", "danger")))
+
+    def load_playlists(self):
+        if not self.client:
+            return
+        g = self._begin_view("playlists", "ПОДБОРКИ", "загрузка канала…")
+        self.search.clear()
+
+        def ok(pls):
+            if g != self.view_gen:
+                return
+            self.current_queue = []
+            h = int(62 * self.cfg["density"])
+            for i, pl in enumerate(pls or []):
+                it = QListWidgetItem(self.list)
+                it.setSizeHint(QSize(0, h))
+                it.setData(Qt.ItemDataRole.UserRole, ("playlist", pl, i))
+                self.list.setItemWidget(it, PlaylistRow(self, pl, i))
+            self.sub_lbl.setText(f"{len(pls or [])} подборок · двойной клик — открыть")
+            QTimer.singleShot(0, self.ensure_visible_covers)
+
+        self.api(lambda: self.client.users_playlists_list(), ok,
+                 lambda m: self.toast(f"ПОДБОРКИ: {m[:60]}", "danger"))
+
+    def open_playlist(self, pl):
+        g = self._begin_view("playlist", getattr(pl, "title", "подборка"), "загрузка треков…")
+        self.set_nav("playlists")
+        self.back_btn.setVisible(True)
+
+        def fetch():
+            shorts = pl.fetch_tracks()
+            tracks = [st.track for st in shorts if getattr(st, "track", None)]
+            missing = [st for st in shorts if not getattr(st, "track", None)]
+            if missing:
+                try:
+                    extra = self.client.tracks([st.id for st in missing])
+                    tracks.extend(extra or [])
+                except Exception:
+                    pass
+            return tracks
+
+        def ok(tracks):
+            if g != self.view_gen:
+                return
+            self.populate_tracks(tracks, f"{len(tracks)} треков · подборка")
+
+        self.api(fetch, ok, lambda m: self.toast(f"ПОДБОРКА: {m[:60]}", "danger"))
+
+    def do_search(self):
+        if not self.client:
+            return
+        q = self.search.text().strip()
+        if not q:
+            self.toast("ПУСТОЙ ЗАПРОС", "warn")
+            return
+        g = self._begin_view("search", "ПОИСК", f"запрос: «{q}» · ищем…")
+
+        def fetch():
+            res = self.client.search(q, type_="track")
+            return list(res.tracks.results) if res.tracks else []
+
+        def ok(tracks):
+            if g != self.view_gen:
+                return
+            if tracks:
+                self.populate_tracks(tracks, f"запрос: «{q}» · {len(tracks)} совпадений")
+            else:
+                self.sub_lbl.setText(f"запрос: «{q}» · ничего не найдено")
+
+        self.api(fetch, ok, lambda m: self.toast(f"ПОИСК: {m[:60]}", "danger"))
+
+    def on_item_double(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        kind, obj, idx = data
+        if kind == "playlist":
+            self.open_playlist(obj)
+        else:
+            self.play_row_obj(obj, idx)
+
+    def play_row(self, row):
+        self.play_row_obj(row.track, row.idx)
+
+    def play_row_obj(self, tr, idx):
+        if self.view != "wave":
+            self.queue_index = idx if idx >= 0 else 0
+        self.request_play(tr)
+
+    def request_play(self, track):
+        self.play_gen += 1
+        gen = self.play_gen
+        self._advancing = False
+        self._dl_active += 1
+        self._refresh_leds()
+        self.d_title.setText("БУФЕРИЗАЦИЯ…")
+        self.d_artist.setText(getattr(track, "title", "")[:80])
+        self.cache_chip.setVisible(False)
+        key = (str(track.id), self.cfg["quality"])
+        cached = self._audio_cache.get(key)
+        if cached and os.path.exists(cached[0]):
+            self.on_audio_ready(gen, cached[0], cached[1], track, True)
+            return
+        w = DownloadWorker(gen, track, self.cfg["quality"])
+        w.ready.connect(self.on_audio_ready)
+        w.fail.connect(self.on_audio_fail)
+        WORKERS.add(w)
+        w.finished.connect(lambda w=w: WORKERS.discard(w))
+        w.start()
+
+    def on_audio_ready(self, gen, path, meta, track, cached):
+        self._dl_active = max(0, self._dl_active - 1)
+        self._audio_cache[(str(track.id), self.cfg["quality"])] = (path, meta)
+        if gen != self.play_gen:
+            self._refresh_leds()
+            return
+        self._media = self.vlc_instance.media_new(path)
+        self.player.stop()
+        self.player.set_media(self._media)
+        if self.player.play() == -1:
+            self.toast("VLC НЕ СМОГ ЗАПУСТИТЬ ФАЙЛ", "danger")
+        self.current_track = track
+        artists = ", ".join(a.name for a in track.artists) if getattr(track, "artists", None) else "—"
+        self.d_title.setText(track.title or "без названия")
+        self.d_artist.setText(artists)
+        self.codec_chip.setText(meta)
+        self.cache_chip.setVisible(bool(cached))
+        self.play_btn.setText("▮▮")
+        self._sync_like_key()
+        self._mark_active_row()
+        self._load_deck_cover(track)
+        self._refresh_leds()
+
+    def on_audio_fail(self, gen, msg):
+        self._dl_active = max(0, self._dl_active - 1)
+        if gen == self.play_gen:
+            self.d_title.setText("СБОЙ ЗАГРУЗКИ")
+            self.toast(f"ТРЕК: {msg[:70]}", "danger")
+        self._refresh_leds()
+
+    def _load_deck_cover(self, track):
+        self.deck_cover.set_image(None)
+        if not getattr(track, "cover_uri", None):
+            return
+        url = "https://" + track.cover_uri.replace("%%", "400x400")
+        tid = str(track.id)
+        if url in IMG_CACHE:
+            self.deck_cover.set_image(IMG_CACHE[url])
+            return
+        w = ImageWorker(url)
+
+        def done(u, img):
+            IMG_CACHE[u] = img
+            while len(IMG_CACHE) > IMG_CACHE_MAX:
+                IMG_CACHE.popitem(last=False)
+            if self.current_track and str(self.current_track.id) == tid:
+                self.deck_cover.set_image(img)
+
+        w.done.connect(done)
+        WORKERS.add(w)
+        w.finished.connect(lambda w=w: WORKERS.discard(w))
+        w.start()
+
+    def _mark_active_row(self):
+        if self._active_row:
+            try:
+                self._active_row.set_active(False)
+            except RuntimeError:
+                pass
+            self._active_row = None
+        if self.current_track:
+            row = self._row_by_id.get(str(self.current_track.id))
+            if row:
+                try:
+                    row.set_active(True)
+                    self._active_row = row
+                except RuntimeError:
+                    pass
+
+    def _sync_like_key(self):
+        liked = bool(self.current_track and str(self.current_track.id) in self.liked_ids)
+        self.like_btn.setProperty("liked", liked)
+        self.like_btn.style().unpolish(self.like_btn)
+        self.like_btn.style().polish(self.like_btn)
+        self.like_btn.setToolTip("Убрать лайк · L" if liked else "Лайк · L")
+        self.dislike_btn.setEnabled(self.view == "wave" and self.current_track is not None)
+
+    def toggle_play(self):
+        if not self.client:
+            return
+        if self.player.is_playing():
+            self.player.pause()
+            self.play_btn.setText("▶")
+        elif self.current_track is not None:
+            self.player.play()
+            self.play_btn.setText("▮▮")
+        elif self.view == "wave":
+            self.start_wave()
+        elif self.current_queue:
+            self.queue_index = 0
+            self.request_play(self.current_queue[0])
+        self._refresh_leds()
+
+    def stop_playback(self):
+        self.player.stop()
+        self.play_btn.setText("▶")
+        self.seek.setValue(0)
+        self.t_cur.setText("0:00")
+        self._refresh_leds()
+
+    def next_track(self):
+        if self.view == "wave":
+            self.feedback("skip")
+            self.wave_next()
+        else:
+            self.next_in_queue()
+
+    def next_in_queue(self):
+        if not self.current_queue:
+            return
+        self.queue_index += 1
+        if self.queue_index < len(self.current_queue):
+            self.request_play(self.current_queue[self.queue_index])
+        else:
+            self.queue_index = len(self.current_queue) - 1
+            self.stop_playback()
+            self.toast("ОЧЕРЕДЬ ЗАВЕРШЕНА", "info")
+
+    def prev_track(self):
+        if self.view == "wave" or self.queue_index <= 0:
+            if self.current_track:
+                self.player.set_time(0)
+            return
+        self.queue_index -= 1
+        self.request_play(self.current_queue[self.queue_index])
+
+    def on_seek(self, value):
+        if self.player.is_seekable():
+            self.player.set_time(value)
+        self.t_cur.setText(fmt_ms(value))
+
+    def on_volume(self, v):
+        self.player.audio_set_volume(v)
+        self.vol_pct.setText(f"{v}%")
+        self.cfg["volume"] = v
+        self._save_timer.start(500)
+
+    def toggle_mute(self):
+        m = not self.player.audio_get_mute()
+        self.player.audio_set_mute(m)
+        self.mute_btn.setText("ЗВУК: ВЫКЛ" if m else "ЗВУК: ВКЛ")
+        self.deck_mute.setText("○" if m else "◉")
+        self.toast("ЗВУК ВЫКЛЮЧЕН" if m else "ЗВУК ВКЛЮЧЕН", "warn" if m else "ok")
+
+    def toggle_like(self):
+        if not self.client or not self.current_track:
+            return
+        tid = str(self.current_track.id)
+        was = tid in self.liked_ids
+        if was:
+            self.liked_ids.discard(tid)
+        else:
+            self.liked_ids.add(tid)
+        self._sync_like_key()
+        self.toast("УБРАНО ИЗ ЛАЙКОВ" if was else "ЛАЙК ДОБАВЛЕН", "warn" if was else "ok")
+        if self.view == "wave":
+            self.feedback("skip" if was else "like")
+
+        def call():
+            if was:
+                return self.client.users_likes_tracks_remove(tid)
+            return self.client.users_likes_tracks_add(tid)
+
+        def err(m):
+            if was:
+                self.liked_ids.add(tid)
+            else:
+                self.liked_ids.discard(tid)
+            self._sync_like_key()
+            self.toast(f"ЛАЙК: {m[:60]}", "danger")
+
+        self.api(call, lambda _: self._after_like(was, tid), err)
+
+    def _after_like(self, was, tid):
+        if was and self.view == "likes":
+            for i in range(self.list.count()):
+                it = self.list.item(i)
+                data = it.data(Qt.ItemDataRole.UserRole)
+                if data and data[0] == "track" and str(data[1].id) == tid:
+                    self.list.takeItem(i)
+                    self._row_by_id.pop(tid, None)
+                    self.current_queue = [t for t in self.current_queue if str(t.id) != tid]
+                    self.sub_lbl.setText(f"{len(self.current_queue)} треков · синхронизировано")
+                    break
+
+    def feedback(self, type_):
+        if not self.client or not self.wave_session or not self.current_track:
+            return
+        tid = self.current_track.id
+
+        def call():
+            try:
+                self.client.rotor_station_feedback(station="user:onyourwave",
+                                                   type_=type_, track_id=tid)
+            except Exception:
+                pass
+            return True
+
+        self.api(call, lambda _: None, lambda m: None)
+
+    def send_dislike(self):
+        if self.view != "wave" or not self.current_track:
+            return
+        self.feedback("dislike")
+        self.toast("ДИЗЛАЙК · ТРЕК СКРЫТ", "danger")
+        self.wave_next()
+
+    def tick_slow(self):
+        self._tick_n += 1
+        if self._tick_n % 2 == 0:
+            self._blink = not self._blink
+        if self._tick_n % 4 == 0:
+            self.clock_lbl.setText(time.strftime("%H:%M:%S"))
+        playing = self.player.is_playing()
+        state = self.player.get_state()
+        length = self.player.get_length()
+        if length > 0:
+            pos = self.player.get_time()
+            if not self.seek.isSliderDown():
+                self.seek.setRange(0, length)
+                self.seek.setValue(pos)
+                self.t_cur.setText(fmt_ms(pos))
+            self.t_dur.setText(fmt_ms(length))
+        if vlc is not None and state == vlc.State.Ended and not self._advancing and self.current_track:
+            self._advancing = True
+            if self.view == "wave":
+                self.feedback("trackFinished")
+                self.wave_next(auto=True)
+            else:
+                self.next_in_queue()
+        if playing and self.play_btn.text() != "▮▮":
+            self.play_btn.setText("▮▮")
+        self._refresh_leds()
+
+    def tick_fast(self):
+        playing = self.player.is_playing()
+        vol = 0.0 if self.player.audio_get_mute() else self.cfg["volume"] / 100
+        if self.cfg["viz"] != "off":
+            if self.viz.tick(0.033, playing, vol):
+                self.viz.update()
+        self.deck_cover.tick(playing)
+
+    def pick_accent(self):
+        cur = self.cfg["accent"] or THEMES[self.cfg["theme"]]["acc"]
+        c = QColorDialog.getColor(QColor(cur), self, "Акцент деки")
+        if c.isValid():
+            self.set_cfg("accent", c.name().upper())
+            self.toast(f"АКЦЕНТ {c.name().upper()}", "accent")
+
+    def randomize(self):
+        rng = random.Random()
+        upd = {
+            "theme": rng.choice(list(THEMES)),
+            "accent": rng.choice(ACCENT_SWATCHES + ["", ""]),
+            "radius": rng.choice([0, 0, 2, 4, 8, 14, 20]),
+            "border": rng.choice([0, 1, 2, 2, 3]),
+            "density": round(rng.uniform(0.85, 1.3), 2),
+            "scale": round(rng.uniform(0.9, 1.15), 2),
+            "pattern": rng.choice(["grid", "scan", "noise", "none"]),
+            "pattern_alpha": round(rng.uniform(0.2, 0.9), 2),
+            "glow": rng.choice([True, True, False]),
+            "glow_power": round(rng.uniform(0.3, 1.0), 2),
+            "viz": rng.choice(["bars", "bars", "wave", "dots"]),
+            "viz_sens": round(rng.uniform(0.4, 1.0), 2),
+            "cover": rng.choice(["square", "vinyl"]),
+            "header_font": rng.choice(list(HEADER_FONTS)),
+        }
+        self.cfg.update(self._sanitize(upd))
+        self.sync_studio()
+        self.restyle()
+        self.save_cfg()
+        self.toast("СЛУЧАЙНЫЙ ПРЕСЕТ СОБРАН", "accent")
+
+    def reset_visual(self):
+        keep = {k: self.cfg[k] for k in ("volume", "quality")}
+        self.cfg = dict(DEFAULTS)
+        self.cfg.update(keep)
+        self.sync_studio()
+        self.apply_structure()
+        self.restyle()
+        self.save_cfg()
+        self.toast("НАСТРОЙКИ СБРОШЕНЫ", "info")
+
+    def export_cfg(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт пресета",
+                                              "signal_theme.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.cfg, f, ensure_ascii=False, indent=2)
+            self.toast("ПРЕСЕТ СОХРАНЁН В ФАЙЛ", "ok")
+        except OSError as e:
+            self.toast(f"ЭКСПОРТ: {e}", "danger")
+
+    def import_cfg(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Импорт пресета", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            clean = self._sanitize(data)
+            if not clean:
+                raise ValueError("в файле нет известных параметров")
+            self.cfg.update(clean)
+            self.sync_studio()
+            self.apply_structure()
+            self.restyle()
+            self.save_cfg()
+            self.player.audio_set_volume(int(self.cfg["volume"]))
+            self.vol.setValue(int(self.cfg["volume"]))
+            self.toast("ПРЕСЕТ ИМПОРТИРОВАН", "ok")
+        except (OSError, ValueError) as e:
+            self.toast(f"ИМПОРТ: {e}", "danger")
+
+    def _shortcuts(self):
+        def sc(key, fn, ctx=Qt.ShortcutContext.WindowShortcut):
+            s = QShortcut(QKeySequence(key), self)
+            s.setContext(ctx)
+            s.activated.connect(fn)
+        sc("Space", self.toggle_play)
+        sc("N", self.next_track)
+        sc("P", self.prev_track)
+        sc("L", self.toggle_like)
+        sc("D", self.send_dislike)
+        sc("M", self.toggle_mute)
+        sc("Ctrl+F", lambda: (self.search.setFocus(), self.search.selectAll()))
+        sc("Ctrl+K", lambda: self.set_cfg("studio_open", not self.cfg["studio_open"]))
+
+    def closeEvent(self, e):
+        self.save_cfg()
+        self.t_slow.stop()
+        self.t_fast.stop()
+        try:
+            self._restyle_timer.stop()
+            self._save_timer.stop()
+        except Exception:
+            pass
+
+        deadline = time.time() + 0.4
+        for w in list(WORKERS):
+            remaining = int(max(0.0, deadline - time.time()) * 1000)
+            if remaining <= 0:
+                break
+            try:
+                w.wait(remaining)
+            except Exception:
+                pass
+
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+
+        e.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("СИГНАЛ//")
+    win = SignalDeck()
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
